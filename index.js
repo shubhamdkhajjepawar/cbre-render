@@ -20,8 +20,10 @@ const DEFAULT_FILTER = {
   location: "Dallas Downtown Historic District, Dallas, TX, USA",
   propertyTypes: ["Office", "Retail"],
   polygon: [
-    [32.79231919690079, -96.78189179351807],
-    [32.77251109127289, -96.81691071441651],
+    [32.787381, -96.792342],
+    [32.775602, -96.811005],
+    [32.787513, -96.803867],
+    [32.773784, -96.795000],
   ],
   pageSize: 1000,
   page: 1,
