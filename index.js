@@ -30,7 +30,6 @@ const DEFAULT_FILTER = {
 // ─── Chrome installer + resolver ──────────────────────────────────────────────
 
 async function ensureChrome() {
-  // 1. Explicit env override — trust it fully
   if (process.env.PUPPETEER_EXECUTABLE_PATH) {
     const p = process.env.PUPPETEER_EXECUTABLE_PATH;
     if (existsSync(p)) {
@@ -40,7 +39,6 @@ async function ensureChrome() {
     console.warn(`  ⚠ PUPPETEER_EXECUTABLE_PATH set but file missing: ${p}`);
   }
 
-  // 2. Ask puppeteer for its expected path
   let expected;
   try {
     expected = puppeteer.executablePath();
@@ -48,13 +46,11 @@ async function ensureChrome() {
     expected = null;
   }
 
-  // 3. If it exists on disk — use it
   if (expected && existsSync(expected)) {
     console.log(`  → Chrome exists: ${expected}`);
     return expected;
   }
 
-  // 4. Binary missing — install now at runtime
   console.log(`  → Chrome not found at: ${expected}`);
   console.log("  → Installing Chrome at runtime...");
   try {
@@ -67,7 +63,6 @@ async function ensureChrome() {
     throw new Error(`Failed to install Chrome at runtime: ${err.message}`);
   }
 
-  // 5. Re-check after install
   try {
     const fresh = puppeteer.executablePath();
     if (existsSync(fresh)) {
@@ -175,7 +170,7 @@ async function fetchListings(page, filter, attempt = 1) {
     console.log(`  → [attempt ${attempt}] Loading CBRE page...`);
     await page.goto(CBRE_PAGE_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
     await new Promise((r) => setTimeout(r, 6000));
-    await page.evaluate(() => document.readyState); // confirm page alive
+    await page.evaluate(() => document.readyState);
 
     console.log(`  → [attempt ${attempt}] Calling listings API...`);
     const result = await page.evaluate(
@@ -267,6 +262,33 @@ function cleanListings(raw) {
     const firstPrice = Array.isArray(pricing) ? pricing[0] : pricing;
     const id = item["Common.PrimaryKey"] || item["Common.ListingId"] || item.id || "";
 
+    // Build slug
+    const buildSlug = () => {
+      const name = (item["Common.PropertyName"] || item["Common.BuildingName"] || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "");
+      const street = (addr["Common.Line1"] || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "");
+      const city = (addr["Common.Locallity"] || addr["Common.Locality"] || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-");
+      const state = (addr["Common.Region"] || "").toLowerCase();
+      const zip = addr["Common.PostCode"] || "";
+      
+      return `${name}/${street}-${city}-${state}-${zip}`
+        .replace(/\/+/g, "/")
+        .replace(/-+/g, "-")
+        .replace(/\/-|-\//g, "/");
+    };
+
+    const slug = id ? buildSlug() : "";
+    const detailUrl = id 
+      ? `${CBRE_BASE}/properties/properties-for-lease/commercial-space/details/${id}/${slug}`
+      : "";
+
     return {
       id,
       name: item["Common.PropertyName"] || item["Common.BuildingName"] || "",
@@ -292,7 +314,8 @@ function cleanListings(raw) {
         item["Dynamic.ThumbnailImage"] ||
         "",
       lastUpdated: item["Common.LastUpdated"] || null,
-      link: id ? `${CBRE_BASE}/properties/${id}` : "",
+      link: detailUrl,
+      propertyUrl: detailUrl,
     };
   });
 }
