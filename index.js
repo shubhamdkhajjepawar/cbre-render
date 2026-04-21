@@ -28,24 +28,19 @@ const DEFAULT_FILTER = {
 // ─── Chrome resolver ──────────────────────────────────────────────────────────
 
 function resolveChromePath() {
-  // 1. Explicit env override
   if (process.env.PUPPETEER_EXECUTABLE_PATH) {
     console.log(`  → Chrome from env: ${process.env.PUPPETEER_EXECUTABLE_PATH}`);
     return process.env.PUPPETEER_EXECUTABLE_PATH;
   }
-
-  // 2. puppeteer's own downloaded binary (works after `npx puppeteer browsers install chrome`)
   try {
     const path = puppeteer.executablePath();
     console.log(`  → Chrome from puppeteer: ${path}`);
     return path;
   } catch (err) {
-    console.warn(`  ⚠ puppeteer.executablePath() failed: ${err.message}`);
+    throw new Error(
+      `Chrome not found: ${err.message}. Add "npx puppeteer browsers install chrome" to build command.`
+    );
   }
-
-  throw new Error(
-    "Chrome not found. Ensure build command includes: npx puppeteer browsers install chrome"
-  );
 }
 
 // ─── Polygon builder ──────────────────────────────────────────────────────────
@@ -57,7 +52,6 @@ function buildPolygonFilter(corners) {
   const maxLat = Math.max(...lats);
   const minLon = Math.min(...lons);
   const maxLon = Math.max(...lons);
-
   const pt = (lat, lon) => `${lat},${lon}`;
   return [
     [
@@ -73,25 +67,26 @@ function buildPolygonFilter(corners) {
 // ─── Browser helpers ──────────────────────────────────────────────────────────
 
 async function launchBrowser() {
-  const executablePath = resolveChromePath();
-
   return puppeteer.launch({
     headless: "new",
-    executablePath,
+    executablePath: resolveChromePath(),
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
-      "--no-zygote",
-      "--single-process",
       "--disable-blink-features=AutomationControlled",
+      // NOTE: no --single-process / --no-zygote — those cause "Navigating frame was detached"
     ],
   });
 }
 
 async function setupPage(browser) {
   const page = await browser.newPage();
+
+  // Increase default timeouts
+  page.setDefaultNavigationTimeout(90000);
+  page.setDefaultTimeout(90000);
 
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => false });
@@ -114,9 +109,11 @@ async function setupPage(browser) {
   return page;
 }
 
-// ─── Fetch listings ───────────────────────────────────────────────────────────
+// ─── Fetch listings (with retry) ──────────────────────────────────────────────
 
-async function fetchListings(page, filter) {
+async function fetchListings(page, filter, attempt = 1) {
+  const MAX_ATTEMPTS = 3;
+
   const polygon = buildPolygonFilter(filter.polygon);
 
   const params = new URLSearchParams({
@@ -138,51 +135,77 @@ async function fetchListings(page, filter) {
     `&transactiontype=allTypes`;
 
   const url = `${CBRE_API_URL}?${params.toString()}`;
-  console.log(`  → URL: ${url.slice(0, 150)}...`);
 
-  console.log("  → Loading CBRE page for session cookies...");
-  await page.goto(CBRE_PAGE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await new Promise((r) => setTimeout(r, 5000));
+  try {
+    console.log(`  → [attempt ${attempt}] Loading CBRE page...`);
 
-  console.log("  → Calling listings API...");
-  const result = await page.evaluate(
-    async (apiUrl, refererUrl) => {
-      try {
-        const res = await fetch(apiUrl, {
-          method: "GET",
-          credentials: "include",
-          headers: {
-            Accept: "application/json, text/plain, */*",
-            Referer: refererUrl,
-          },
-        });
+    await page.goto(CBRE_PAGE_URL, {
+      waitUntil: "domcontentloaded",
+      timeout: 90000,
+    });
 
-        const text = await res.text();
+    // Wait for page to stabilise — avoids detached frame on redirect/SPA init
+    await new Promise((r) => setTimeout(r, 6000));
 
-        if (!res.ok) {
-          return { error: true, status: res.status, body: text };
-        }
+    // Confirm page is still alive before fetch
+    await page.evaluate(() => document.readyState);
 
+    console.log(`  → [attempt ${attempt}] Calling listings API...`);
+
+    const result = await page.evaluate(
+      async (apiUrl, refererUrl) => {
         try {
-          return { ok: true, data: JSON.parse(text) };
-        } catch {
-          return { error: true, status: res.status, body: text };
+          const res = await fetch(apiUrl, {
+            method: "GET",
+            credentials: "include",
+            headers: {
+              Accept: "application/json, text/plain, */*",
+              Referer: refererUrl,
+            },
+          });
+          const text = await res.text();
+          if (!res.ok) return { error: true, status: res.status, body: text };
+          try {
+            return { ok: true, data: JSON.parse(text) };
+          } catch {
+            return { error: true, status: res.status, body: text };
+          }
+        } catch (e) {
+          return { error: true, message: e.message };
         }
-      } catch (e) {
-        return { error: true, message: e.message };
-      }
-    },
-    url,
-    referer
-  );
-
-  if (result?.error) {
-    throw new Error(
-      `API error ${result.status || ""}: ${result.body?.slice(0, 300) || result.message}`
+      },
+      url,
+      referer
     );
-  }
 
-  return result.data;
+    if (result?.error) {
+      throw new Error(
+        `API error ${result.status || ""}: ${result.body?.slice(0, 300) || result.message}`
+      );
+    }
+
+    return result.data;
+
+  } catch (err) {
+    const isDetached =
+      err.message.includes("detached") ||
+      err.message.includes("Target closed") ||
+      err.message.includes("Session closed") ||
+      err.message.includes("Navigation failed");
+
+    if (isDetached && attempt < MAX_ATTEMPTS) {
+      console.warn(`  ⚠ Frame detached (attempt ${attempt}), retrying in 3s...`);
+      await new Promise((r) => setTimeout(r, 3000));
+
+      // Re-create page on detach — old page is dead
+      try { await page.close(); } catch { /* already dead */ }
+      const browser = page.browser();
+      const freshPage = await setupPage(browser);
+      return fetchListings(freshPage, filter, attempt + 1);
+    }
+
+    throw err;
+  }
 }
 
 // ─── Data cleaner ─────────────────────────────────────────────────────────────
@@ -224,12 +247,8 @@ function cleanListings(raw) {
     const firstSize = Array.isArray(sizes) ? sizes[0] : sizes;
     const pricing = item["Common.Pricing"] || [];
     const firstPrice = Array.isArray(pricing) ? pricing[0] : pricing;
-
     const id =
-      item["Common.PrimaryKey"] ||
-      item["Common.ListingId"] ||
-      item.id ||
-      "";
+      item["Common.PrimaryKey"] || item["Common.ListingId"] || item.id || "";
 
     return {
       id,
@@ -280,7 +299,7 @@ async function fetchCBREListings(filter = DEFAULT_FILTER) {
       listings,
     };
   } finally {
-    await browser.close();
+    await browser.close().catch(() => {});
   }
 }
 
@@ -383,7 +402,6 @@ app.post("/cbre", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`\n🚀 http://localhost:${PORT}`);
   console.log(`   Listings → http://localhost:${PORT}/cbre\n`);
-
   try {
     const chromePath = resolveChromePath();
     console.log(`   ✓ Chrome resolved: ${chromePath}\n`);
