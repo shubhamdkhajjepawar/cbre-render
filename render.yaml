@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: cbre-api
+    env: node
+    buildCommand: npm install && npx puppeteer browsers install chrome
+    startCommand: npm start
+    envVars:
+      - key: PUPPETEER_EXECUTABLE_PATH
+        value: /opt/render/.cache/puppeteer/chrome/linux-147.0.7727.57/chrome-linux64/chrome

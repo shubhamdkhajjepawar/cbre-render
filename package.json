@@ -4,12 +4,12 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "build": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "cors": "^2.8.6",
     "express": "^4.22.1",
-    "node-fetch": "^3.3.2",
     "puppeteer": "^24.42.0"
   }
 }
