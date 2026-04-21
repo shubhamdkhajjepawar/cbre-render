@@ -1,0 +1,155 @@
+import express from "express";
+import cors from "cors";
+import puppeteer from "puppeteer";
+
+const app = express();
+app.use(cors());
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => {
+  res.send("CBRE API running. Use /cbre");
+});
+
+async function fetchCBREData() {
+  const browser = await puppeteer.launch({
+    headless: false,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-blink-features=AutomationControlled"
+    ],
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || 
+                    process.env.CHROME_BIN || 
+                    puppeteer.executablePath()
+  });
+
+  const page = await browser.newPage();
+  
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  });
+  
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+  
+  try {
+    console.log("→ Loading CBRE...");
+    
+    await page.goto(
+      "https://www.cbre.com/properties/properties-for-lease/commercial-space",
+      { waitUntil: "networkidle2", timeout: 90000 }
+    );
+    
+    console.log("→ Waiting...");
+    await new Promise(r => setTimeout(r, 15000));
+    
+    console.log("→ Getting token...");
+    
+    const token = await page.evaluate(async () => {
+      try {
+        const res = await fetch("/coveo/rest/token", {
+          credentials: "include"
+        });
+        const json = await res.json();
+        return json.token;
+      } catch (e) {
+        return null;
+      }
+    });
+    
+    if (!token) throw new Error("No token");
+    
+    console.log("✓ Token OK");
+    
+    // API URL from browser
+    const apiUrl = `https://www.cbre.com/listings-api/propertylistings/query?Site=us-comm&CurrencyCode=USD&Unit=sqft&PageSize=50&Page=1&Sort=desc(Common.LastUpdated)`;
+    
+    console.log("→ Fetching...");
+    
+    const data = await page.evaluate(async (url, tkn) => {
+      const res = await fetch(url, {
+        headers: {
+          "accept": "application/json",
+          "authorization": `Bearer ${tkn}`
+        }
+      });
+      return await res.json();
+    }, apiUrl, token);
+    
+    await browser.close();
+    return data;
+    
+  } catch (err) {
+    await browser.close();
+    throw err;
+  }
+}
+
+function cleanData(data) {
+  // Parse Documents[0] array
+  const items = data?.Documents?.[0] || [];
+  
+  return items.map((item) => {
+    const addr = item["Common.ActualAddress"] || {};
+    const coord = item["Common.Coordinate"] || {};
+    const img = item["Dynamic.PrimaryImage"] || {};
+    const sizes = item["Common.TotalSize"] || [];
+    
+    return {
+      id: item["Common.PrimaryKey"] || "",
+      address: `${addr["Common.Line1"] || ""} ${addr["Common.Line2"] || ""}`.trim(),
+      city: addr["Common.Locallity"] || "",
+      state: addr["Common.Region"] || "",
+      zip: addr["Common.PostCode"] || "",
+      latitude: coord.lat ?? null,
+      longitude: coord.lon ?? null,
+      size: sizes[0]?.["Common.Size"] || 0,
+      unit: sizes[0]?.["Common.Units"] || "sqft",
+      type: item["Common.UsageType"] || "",
+      image: img?.["Common.ImageResources"]?.[0]?.["Source.Uri"] || "",
+      link: `https://www.cbre.com/properties/${item["Common.PrimaryKey"] || ""}`
+    };
+  });
+}
+
+app.get("/cbre", async (req, res) => {
+  try {
+    console.log("\n=== CBRE FETCH ===");
+    const raw = await fetchCBREData();
+    const cleaned = cleanData(raw);
+    console.log(`✓ ${cleaned.length} listings\n`);
+    res.json({
+      success: true,
+      count: cleaned.length,
+      data: cleaned
+    });
+  } catch (err) {
+    console.error("✗ ERROR:", err.message);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`\n🚀 http://localhost:${PORT}/cbre\n`);
+});
+
+
+//package
+
+{
+  "name": "cbre-server",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "build": "npx puppeteer browsers install chrome"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^4.22.1",
+    "puppeteer": "^24.42.0"
+  }
+}

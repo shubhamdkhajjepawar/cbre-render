@@ -1,15 +1,14 @@
 {
-  "name": "cbre-server",
+  "name": "cbre-scraper",
   "version": "1.0.0",
   "type": "module",
-  "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "build": "npx puppeteer browsers install chrome"
+    "dev": "node --watch index.js"
   },
   "dependencies": {
-    "cors": "^2.8.6",
-    "express": "^4.22.1",
-    "puppeteer": "^24.42.0"
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "puppeteer": "^21.0.0"
   }
 }
