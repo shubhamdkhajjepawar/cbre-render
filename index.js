@@ -6,7 +6,7 @@ import { existsSync } from "fs";
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
@@ -27,136 +27,54 @@ const DEFAULT_FILTER = {
   page: 1,
 };
 
-// ─── Chrome setup ─────────────────────────────────────────────────────────────
+// ─── Chrome installer + resolver ──────────────────────────────────────────────
 
 async function ensureChrome() {
-  // Try env var first
-  if (
-    process.env.PUPPETEER_EXECUTABLE_PATH &&
-    existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)
-  ) {
-    console.log(`✓ Chrome from env: ${process.env.PUPPETEER_EXECUTABLE_PATH}`);
-    return process.env.PUPPETEER_EXECUTABLE_PATH;
-  }
-
-  // Common system paths
-  const systemPaths = [
-    "/usr/bin/google-chrome",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/chromium",
-    "/snap/bin/chromium",
-    process.env.PUPPETEER_EXECUTABLE_PATH,
-  ].filter(Boolean);
-
-  for (const path of systemPaths) {
-    if (existsSync(path)) {
-      console.log(`✓ Chrome found: ${path}`);
-      return path;
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    const p = process.env.PUPPETEER_EXECUTABLE_PATH;
+    if (existsSync(p)) {
+      console.log(`  → Chrome from env: ${p}`);
+      return p;
     }
+    console.warn(`  ⚠ PUPPETEER_EXECUTABLE_PATH set but file missing: ${p}`);
   }
 
-  // Try puppeteer default
+  let expected;
   try {
-    const defaultPath = puppeteer.executablePath();
-    if (existsSync(defaultPath)) {
-      console.log(`✓ Chrome at default: ${defaultPath}`);
-      return defaultPath;
-    }
-  } catch (e) {
-    console.log("No default Chrome path");
+    expected = puppeteer.executablePath();
+  } catch {
+    expected = null;
   }
 
-  // Install
-  console.log("→ Installing Chrome...");
+  if (expected && existsSync(expected)) {
+    console.log(`  → Chrome exists: ${expected}`);
+    return expected;
+  }
+
+  console.log(`  → Chrome not found at: ${expected}`);
+  console.log("  → Installing Chrome at runtime...");
   try {
-    execSync("npx @puppeteer/browsers install chrome@stable", {
+    execSync("npx puppeteer browsers install chrome", {
       stdio: "inherit",
-      timeout: 180000,
+      timeout: 120000,
     });
+    console.log("  → Chrome installed.");
   } catch (err) {
-    throw new Error(`Chrome install failed: ${err.message}`);
+    throw new Error(`Failed to install Chrome at runtime: ${err.message}`);
   }
 
-  // Retry default path
   try {
-    const installed = puppeteer.executablePath();
-    if (existsSync(installed)) {
-      console.log(`✓ Chrome installed: ${installed}`);
-      return installed;
+    const fresh = puppeteer.executablePath();
+    if (existsSync(fresh)) {
+      console.log(`  → Chrome ready: ${fresh}`);
+      return fresh;
     }
-  } catch {}
+  } catch { /* fall through */ }
 
-  throw new Error("Chrome install succeeded but binary not found");
+  throw new Error("Chrome install ran but binary still not found.");
 }
 
-// ─── Browser ──────────────────────────────────────────────────────────────────
-
-async function launchBrowser() {
-  const executablePath = await ensureChrome();
-
-  const args = [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--disable-blink-features=AutomationControlled",
-    "--disable-features=IsolateOrigins,site-per-process",
-    "--disable-web-security",
-    "--disable-background-networking",
-    "--disable-default-apps",
-    "--disable-extensions",
-    "--disable-sync",
-    "--metrics-recording-only",
-    "--mute-audio",
-    "--no-first-run",
-    "--safebrowsing-disable-auto-update",
-    "--single-process", // Risky but helps in constrained envs
-  ];
-
-  console.log("→ Launching browser...");
-
-  const browser = await puppeteer.launch({
-    headless: "shell", // More stable than "new"
-    executablePath,
-    args,
-    timeout: 120000, // Increase timeout
-    protocolTimeout: 120000,
-    dumpio: false, // Set true for debugging
-  });
-
-  console.log("✓ Browser launched");
-  return browser;
-}
-
-async function setupPage(browser) {
-  const page = await browser.newPage();
-
-  await page.setViewport({ width: 1920, height: 1080 });
-  await page.setDefaultNavigationTimeout(90000);
-  await page.setDefaultTimeout(90000);
-
-  await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => false });
-    window.chrome = { runtime: {} };
-  });
-
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  );
-
-  await page.setExtraHTTPHeaders({
-    "Accept-Language": "en-US,en;q=0.9",
-    Accept: "application/json, text/plain, */*",
-    "sec-ch-ua": '"Chromium";v="131", "Not_A Brand";v="24"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-  });
-
-  return page;
-}
-
-// ─── Polygon ──────────────────────────────────────────────────────────────────
+// ─── Polygon builder ──────────────────────────────────────────────────────────
 
 function buildPolygonFilter(corners) {
   const lats = corners.map((c) => c[0]);
@@ -177,10 +95,55 @@ function buildPolygonFilter(corners) {
   ];
 }
 
-// ─── Fetch ────────────────────────────────────────────────────────────────────
+// ─── Browser helpers ──────────────────────────────────────────────────────────
+
+async function launchBrowser() {
+  const executablePath = await ensureChrome();
+
+  return puppeteer.launch({
+    headless: "new",
+    executablePath,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-blink-features=AutomationControlled",
+    ],
+  });
+}
+
+async function setupPage(browser) {
+  const page = await browser.newPage();
+  page.setDefaultNavigationTimeout(90000);
+  page.setDefaultTimeout(90000);
+
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
+    window.chrome = { runtime: {} };
+  });
+
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+  );
+
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "en-US,en;q=0.9",
+    Accept: "application/json, text/plain, */*",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not_A Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+  });
+
+  return page;
+}
+
+// ─── Fetch listings (with retry) ──────────────────────────────────────────────
 
 async function fetchListings(page, filter, attempt = 1) {
   const MAX_ATTEMPTS = 3;
+
   const polygon = buildPolygonFilter(filter.polygon);
 
   const params = new URLSearchParams({
@@ -204,17 +167,12 @@ async function fetchListings(page, filter, attempt = 1) {
   const url = `${CBRE_API_URL}?${params.toString()}`;
 
   try {
-    console.log(`→ [${attempt}/${MAX_ATTEMPTS}] Loading page...`);
+    console.log(`  → [attempt ${attempt}] Loading CBRE page...`);
+    await page.goto(CBRE_PAGE_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
+    await new Promise((r) => setTimeout(r, 6000));
+    await page.evaluate(() => document.readyState);
 
-    await page.goto(CBRE_PAGE_URL, {
-      waitUntil: "networkidle2",
-      timeout: 90000,
-    });
-
-    await new Promise((r) => setTimeout(r, 8000)); // Let JS settle
-
-    console.log(`→ [${attempt}/${MAX_ATTEMPTS}] Calling API...`);
-
+    console.log(`  → [attempt ${attempt}] Calling listings API...`);
     const result = await page.evaluate(
       async (apiUrl, refererUrl) => {
         try {
@@ -226,13 +184,8 @@ async function fetchListings(page, filter, attempt = 1) {
               Referer: refererUrl,
             },
           });
-
           const text = await res.text();
-
-          if (!res.ok) {
-            return { error: true, status: res.status, body: text };
-          }
-
+          if (!res.ok) return { error: true, status: res.status, body: text };
           try {
             return { ok: true, data: JSON.parse(text) };
           } catch {
@@ -243,34 +196,29 @@ async function fetchListings(page, filter, attempt = 1) {
         }
       },
       url,
-      referer,
+      referer
     );
 
     if (result?.error) {
       throw new Error(
-        `API error ${result.status || ""}: ${result.body?.slice(0, 300) || result.message}`,
+        `API error ${result.status || ""}: ${result.body?.slice(0, 300) || result.message}`
       );
     }
 
-    console.log("✓ Data received");
     return result.data;
+
   } catch (err) {
     const isRetryable =
       err.message.includes("detached") ||
       err.message.includes("Target closed") ||
       err.message.includes("Session closed") ||
-      err.message.includes("Navigation") ||
-      err.message.includes("net::ERR") ||
-      err.message.includes("timeout");
+      err.message.includes("Navigation failed") ||
+      err.message.includes("net::ERR");
 
     if (isRetryable && attempt < MAX_ATTEMPTS) {
-      console.warn(`⚠ Retry ${attempt}: ${err.message}`);
-      await new Promise((r) => setTimeout(r, 5000));
-
-      try {
-        await page.close();
-      } catch {}
-
+      console.warn(`  ⚠ Retryable error (attempt ${attempt}): ${err.message}`);
+      await new Promise((r) => setTimeout(r, 3000));
+      try { await page.close(); } catch { /* already dead */ }
       const freshPage = await setupPage(page.browser());
       return fetchListings(freshPage, filter, attempt + 1);
     }
@@ -279,7 +227,7 @@ async function fetchListings(page, filter, attempt = 1) {
   }
 }
 
-// ─── Clean ────────────────────────────────────────────────────────────────────
+// ─── Data cleaner ─────────────────────────────────────────────────────────────
 
 function cleanListings(raw) {
   let items = null;
@@ -291,17 +239,16 @@ function cleanListings(raw) {
   else if (Array.isArray(raw?.results)) items = raw.results;
   else if (Array.isArray(raw?.listings)) items = raw.listings;
   else {
-    const arrayField = Object.keys(raw || {}).find((k) =>
-      Array.isArray(raw[k]),
-    );
+    const arrayField = Object.keys(raw || {}).find((k) => Array.isArray(raw[k]));
     if (arrayField) {
-      console.log(`→ Using field: "${arrayField}"`);
+      console.log(`  → Using array field: "${arrayField}"`);
       items = raw[arrayField];
     }
   }
 
   if (!items) {
-    console.warn("⚠ Unknown shape:", Object.keys(raw || {}));
+    console.warn("  ⚠ Unknown shape. Keys:", Object.keys(raw || {}));
+    console.warn("  Sample:", JSON.stringify(raw).slice(0, 500));
     return [];
   }
 
@@ -313,15 +260,11 @@ function cleanListings(raw) {
     const firstSize = Array.isArray(sizes) ? sizes[0] : sizes;
     const pricing = item["Common.Pricing"] || [];
     const firstPrice = Array.isArray(pricing) ? pricing[0] : pricing;
-    const id =
-      item["Common.PrimaryKey"] || item["Common.ListingId"] || item.id || "";
+    const id = item["Common.PrimaryKey"] || item["Common.ListingId"] || item.id || "";
 
+    // Build slug
     const buildSlug = () => {
-      const name = (
-        item["Common.PropertyName"] ||
-        item["Common.BuildingName"] ||
-        ""
-      )
+      const name = (item["Common.PropertyName"] || item["Common.BuildingName"] || "")
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-|-$/g, "");
@@ -334,7 +277,7 @@ function cleanListings(raw) {
         .replace(/[^a-z0-9]+/g, "-");
       const state = (addr["Common.Region"] || "").toLowerCase();
       const zip = addr["Common.PostCode"] || "";
-
+      
       return `${name}/${street}-${city}-${state}-${zip}`
         .replace(/\/+/g, "/")
         .replace(/-+/g, "-")
@@ -342,15 +285,14 @@ function cleanListings(raw) {
     };
 
     const slug = id ? buildSlug() : "";
-    const detailUrl = id
+    const detailUrl = id 
       ? `${CBRE_BASE}/properties/properties-for-lease/commercial-space/details/${id}/${slug}`
       : "";
 
     return {
       id,
       name: item["Common.PropertyName"] || item["Common.BuildingName"] || "",
-      address:
-        `${addr["Common.Line1"] || ""} ${addr["Common.Line2"] || ""}`.trim(),
+      address: `${addr["Common.Line1"] || ""} ${addr["Common.Line2"] || ""}`.trim(),
       city: addr["Common.Locallity"] || addr["Common.Locality"] || "",
       state: addr["Common.Region"] || "",
       zip: addr["Common.PostCode"] || "",
@@ -359,8 +301,7 @@ function cleanListings(raw) {
       longitude: coord.lon ?? coord.lng ?? coord.longitude ?? null,
       size: firstSize?.["Common.Size"] || 0,
       sizeUnit: firstSize?.["Common.Units"] || "sqft",
-      propertyType:
-        item["Common.UsageType"] || item["Common.PropertyType"] || "",
+      propertyType: item["Common.UsageType"] || item["Common.PropertyType"] || "",
       transactionType: item["Common.TransactionType"] || "",
       floor: item["Common.Floor"] || null,
       suite: item["Common.Suite"] || "",
@@ -379,23 +320,16 @@ function cleanListings(raw) {
   });
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+// ─── Main orchestrator ────────────────────────────────────────────────────────
 
 async function fetchCBREListings(filter = DEFAULT_FILTER) {
-  let browser;
+  const browser = await launchBrowser();
+  const page = await setupPage(browser);
   try {
-    browser = await launchBrowser();
-    const page = await setupPage(browser);
-
     const raw = await fetchListings(page, filter);
-    console.log("→ Keys:", Object.keys(raw || {}).join(", "));
-
-    if (raw?.TotalCount !== undefined) {
-      console.log(`→ Total: ${raw.TotalCount}`);
-    }
-
+    console.log("  → Response keys:", Object.keys(raw || {}).join(", "));
+    if (raw?.TotalCount !== undefined) console.log(`  → TotalCount: ${raw.TotalCount}`);
     const listings = cleanListings(raw);
-
     return {
       totalCount: raw?.TotalCount ?? raw?.totalCount ?? listings.length,
       page: filter.page,
@@ -403,40 +337,30 @@ async function fetchCBREListings(filter = DEFAULT_FILTER) {
       listings,
     };
   } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
+    await browser.close().catch(() => {});
   }
 }
 
-// ─── Parse ────────────────────────────────────────────────────────────────────
+// ─── Filter parser ────────────────────────────────────────────────────────────
 
 function parseFilter(query = {}, body = {}) {
   const src = Object.keys(body).length ? body : query;
   const filter = { ...DEFAULT_FILTER };
-
   if (src.location) filter.location = src.location;
-
   if (src.types || src.propertyTypes) {
     const raw = src.types || src.propertyTypes;
     filter.propertyTypes = Array.isArray(raw)
       ? raw
-      : String(raw)
-          .split(",")
-          .map((s) => s.trim());
+      : String(raw).split(",").map((s) => s.trim());
   }
-
   if (src.polygon) {
     try {
       filter.polygon =
         typeof src.polygon === "string" ? JSON.parse(src.polygon) : src.polygon;
-    } catch {}
+    } catch { /* keep default */ }
   }
-
   if (src.page) filter.page = parseInt(src.page, 10) || 1;
-  if (src.pageSize)
-    filter.pageSize = Math.min(parseInt(src.pageSize, 10) || 1000, 5000);
-
+  if (src.pageSize) filter.pageSize = Math.min(parseInt(src.pageSize, 10) || 1000, 5000);
   return filter;
 }
 
@@ -446,10 +370,10 @@ app.get("/", (req, res) => {
   res.json({
     status: "CBRE scraper running",
     endpoints: {
-      "GET /cbre": "Default Dallas Downtown",
-      "GET /cbre?types=Office&page=1": "Custom params",
-      "POST /cbre": "JSON body filter",
-      "GET /health": "Chrome check",
+      "GET /cbre": "Default Dallas Downtown filter",
+      "GET /cbre?types=Office,Retail&page=1&pageSize=500": "Custom params",
+      "POST /cbre": "Custom filter via JSON body",
+      "GET /health": "Chrome path + disk check",
     },
     defaultFilter: DEFAULT_FILTER,
   });
@@ -458,11 +382,7 @@ app.get("/", (req, res) => {
 app.get("/health", async (req, res) => {
   try {
     const chromePath = await ensureChrome();
-    res.json({
-      status: "ok",
-      chrome: chromePath,
-      exists: existsSync(chromePath),
-    });
+    res.json({ status: "ok", chrome: chromePath, exists: existsSync(chromePath) });
   } catch (err) {
     res.status(500).json({ status: "error", error: err.message });
   }
@@ -471,12 +391,10 @@ app.get("/health", async (req, res) => {
 app.get("/cbre", async (req, res) => {
   console.log("\n=== GET /cbre ===");
   const filter = parseFilter(req.query);
-  console.log("Filter:", JSON.stringify(filter, null, 2));
-
+  console.log("  Filter:", JSON.stringify(filter));
   try {
     const result = await fetchCBREListings(filter);
-    console.log(`✓ ${result.listings.length} listings\n`);
-
+    console.log(`  ✓ ${result.listings.length} listings\n`);
     res.json({
       success: true,
       totalCount: result.totalCount,
@@ -486,7 +404,7 @@ app.get("/cbre", async (req, res) => {
       data: result.listings,
     });
   } catch (err) {
-    console.error("✗", err.message);
+    console.error("  ✗", err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -494,12 +412,10 @@ app.get("/cbre", async (req, res) => {
 app.post("/cbre", async (req, res) => {
   console.log("\n=== POST /cbre ===");
   const filter = parseFilter({}, req.body);
-  console.log("Filter:", JSON.stringify(filter, null, 2));
-
+  console.log("  Filter:", JSON.stringify(filter));
   try {
     const result = await fetchCBREListings(filter);
-    console.log(`✓ ${result.listings.length} listings\n`);
-
+    console.log(`  ✓ ${result.listings.length} listings\n`);
     res.json({
       success: true,
       totalCount: result.totalCount,
@@ -509,7 +425,7 @@ app.post("/cbre", async (req, res) => {
       data: result.listings,
     });
   } catch (err) {
-    console.error("✗", err.message);
+    console.error("  ✗", err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -517,14 +433,12 @@ app.post("/cbre", async (req, res) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, async () => {
-  console.log(`\n🚀 Server: http://localhost:${PORT}`);
-  console.log(`   Listings: http://localhost:${PORT}/cbre\n`);
-
+  console.log(`\n🚀 http://localhost:${PORT}`);
+  console.log(`   Listings → http://localhost:${PORT}/cbre\n`);
   try {
     const chromePath = await ensureChrome();
-    console.log(`✓ Chrome ready: ${chromePath}\n`);
+    console.log(`   ✓ Chrome ready: ${chromePath}\n`);
   } catch (err) {
-    console.error(`✗ Chrome setup failed: ${err.message}\n`);
-    console.error("   Try: npm run build\n");
+    console.error(`   ✗ Chrome setup failed: ${err.message}\n`);
   }
 });
