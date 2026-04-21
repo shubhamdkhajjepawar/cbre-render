@@ -17,7 +17,6 @@ const CBRE_API_URL = `${CBRE_BASE}/listings-api/propertylistings/query`;
 const DEFAULT_FILTER = {
   location: "Dallas Downtown Historic District, Dallas, TX, USA",
   propertyTypes: ["Office", "Retail"],
-  // Two diagonal corners — server builds full bounding-box polygon
   polygon: [
     [32.79231919690079, -96.78189179351807],
     [32.77251109127289, -96.81691071441651],
@@ -26,10 +25,30 @@ const DEFAULT_FILTER = {
   page: 1,
 };
 
+// ─── Chrome resolver ──────────────────────────────────────────────────────────
+
+function resolveChromePath() {
+  // 1. Explicit env override
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    console.log(`  → Chrome from env: ${process.env.PUPPETEER_EXECUTABLE_PATH}`);
+    return process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
+
+  // 2. puppeteer's own downloaded binary (works after `npx puppeteer browsers install chrome`)
+  try {
+    const path = puppeteer.executablePath();
+    console.log(`  → Chrome from puppeteer: ${path}`);
+    return path;
+  } catch (err) {
+    console.warn(`  ⚠ puppeteer.executablePath() failed: ${err.message}`);
+  }
+
+  throw new Error(
+    "Chrome not found. Ensure build command includes: npx puppeteer browsers install chrome"
+  );
+}
+
 // ─── Polygon builder ──────────────────────────────────────────────────────────
-// CBRE expects PolygonFilters = array of closed rings
-// Each point = ["lat", "lon"] as strings
-// From two diagonal corners → 5-point closed bounding box
 
 function buildPolygonFilter(corners) {
   const lats = corners.map((c) => c[0]);
@@ -39,8 +58,6 @@ function buildPolygonFilter(corners) {
   const minLon = Math.min(...lons);
   const maxLon = Math.max(...lons);
 
-  // CBRE format: each point is "lat,lon" as a single comma-joined string
-  // Closed ring: SW → NW → NE → SE → SW
   const pt = (lat, lon) => `${lat},${lon}`;
   return [
     [
@@ -56,17 +73,20 @@ function buildPolygonFilter(corners) {
 // ─── Browser helpers ──────────────────────────────────────────────────────────
 
 async function launchBrowser() {
+  const executablePath = resolveChromePath();
+
   return puppeteer.launch({
     headless: "new",
+    executablePath,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--no-zygote",
+      "--single-process",
       "--disable-blink-features=AutomationControlled",
     ],
-    executablePath:
-      process.env.PUPPETEER_EXECUTABLE_PATH ||
-      process.env.CHROME_BIN ||
-      puppeteer.executablePath(),
   });
 }
 
@@ -78,25 +98,17 @@ async function setupPage(browser) {
     window.chrome = { runtime: {} };
   });
 
-  // Match exact browser headers from the working curl
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
   );
 
   await page.setExtraHTTPHeaders({
     "Accept-Language": "en-US,en;q=0.9",
     Accept: "application/json, text/plain, */*",
-    "sec-ch-ua":
-      '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not_A Brand";v="99"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Windows"',
-    "sec-ch-ua-arch": '"x86"',
-    "sec-ch-ua-bitness": '"64"',
-    "sec-ch-ua-model": '""',
-    "sec-ch-ua-platform-version": '"19.0.0"',
-    "sec-ch-ua-full-version-list":
-      '"Chromium";v="142.0.7444.176", "Google Chrome";v="142.0.7444.176", "Not_A Brand";v="99.0.0.0"',
   });
 
   return page;
@@ -107,7 +119,6 @@ async function setupPage(browser) {
 async function fetchListings(page, filter) {
   const polygon = buildPolygonFilter(filter.polygon);
 
-  // Build params exactly matching the working curl
   const params = new URLSearchParams({
     Site: "us-comm",
     CurrencyCode: "USD",
@@ -129,7 +140,6 @@ async function fetchListings(page, filter) {
   const url = `${CBRE_API_URL}?${params.toString()}`;
   console.log(`  → URL: ${url.slice(0, 150)}...`);
 
-  // Load CBRE first to get cookies/session
   console.log("  → Loading CBRE page for session cookies...");
   await page.goto(CBRE_PAGE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
   await new Promise((r) => setTimeout(r, 5000));
@@ -259,7 +269,6 @@ async function fetchCBREListings(filter = DEFAULT_FILTER) {
 
   try {
     const raw = await fetchListings(page, filter);
-
     console.log("  → Response keys:", Object.keys(raw || {}).join(", "));
     if (raw?.TotalCount !== undefined) console.log(`  → TotalCount: ${raw.TotalCount}`);
 
@@ -312,9 +321,19 @@ app.get("/", (req, res) => {
       "GET /cbre": "Default Dallas Downtown filter",
       "GET /cbre?types=Office,Retail&page=1&pageSize=500": "Custom params",
       "POST /cbre": "Custom filter via JSON body",
+      "GET /health": "Chrome path check",
     },
     defaultFilter: DEFAULT_FILTER,
   });
+});
+
+app.get("/health", (req, res) => {
+  try {
+    const chromePath = resolveChromePath();
+    res.json({ status: "ok", chrome: chromePath });
+  } catch (err) {
+    res.status(500).json({ status: "error", error: err.message });
+  }
 });
 
 app.get("/cbre", async (req, res) => {
@@ -364,4 +383,11 @@ app.post("/cbre", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`\n🚀 http://localhost:${PORT}`);
   console.log(`   Listings → http://localhost:${PORT}/cbre\n`);
+
+  try {
+    const chromePath = resolveChromePath();
+    console.log(`   ✓ Chrome resolved: ${chromePath}\n`);
+  } catch (err) {
+    console.error(`   ✗ Chrome not found: ${err.message}\n`);
+  }
 });
